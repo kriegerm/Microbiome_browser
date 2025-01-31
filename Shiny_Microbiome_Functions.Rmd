@@ -1,0 +1,235 @@
+---
+title: "Microbiome Functions"
+author: "Madeline Krieger"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    theme: "cosmo"
+    code_folding: "show"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE,
+                      warning = FALSE,
+                      error = FALSE,
+                      cache = FALSE,
+                      # Do not use lazy loading which fails for large objects
+                      cache.lazy = FALSE)
+```
+
+
+
+
+```{r load-packages}
+library("pacman")
+pacman::p_load("rmarkdown", "tidyverse", "phyloseq", "knitr","kableExtra", "here", "plyr")
+
+set.seed(1234)
+date = Sys.Date()
+``` 
+
+
+# Data Processing
+
+## Construct phyloseq function
+
+Example:
+
+Define variables and file locations
+biom_location <- "PRJNA822685_OSCC/Qiime2/blast/Files_For_Phyloseq/feature_table_w_taxonomy.biom"
+tree_location <- "PRJNA822685_OSCC/Qiime2/Tree/Unfiltered_Rooted_tree_for_phyloseq/tree.nwk"
+sampledata_location <- "PRJNA822685_OSCC/Qiime2/Files_For_Phyloseq/metadata_phyloseq.tsv"
+
+construct_phyloseq("phy_obj_oscc", biom_location, tree_location, sampledata_location)
+```{r define_construct_phyloseq}
+construct_phyloseq <- function(phyloseq_object_name, biom_location, tree_location, sampledata_location) {
+  # Validate inputs
+  if (!file.exists(biom_location)) stop("The biom file does not exist.")
+  if (!file.exists(tree_location)) stop("The tree file does not exist.")
+  if (!file.exists(sampledata_location)) stop("The sample data file does not exist.")
+  
+  ps1 <- import_biom(biom_location) 
+  tree <- read_tree(tree_location)
+  
+  #Add the Taxonomic Ranks to the different Taxonomic levels
+  colnames(tax_table(ps1)) = c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+  
+  #Combine all F. nucleatum subspecies
+  tax_tab_extracted <- tax_table(ps1) %>% as.matrix() %>% as.data.frame() %>%
+    mutate(Species = str_replace(Species, "^s__nucleatum_subsp\\._.*", "s__nucleatum"))
+  tax_tab <- tax_table(as.matrix(tax_tab_extracted))
+  
+  OTU_tab <- ps1@otu_table 
+  
+  #Generate the Phyloseq Object
+  phylo_obj <- phyloseq(OTU_tab, tax_tab)
+  sample_data(phylo_obj) <- import_qiime_sample_data(sampledata_location)
+  
+  #Update the tax table so that genus and species are joined for the species column
+  tax_df <- phylo_obj@tax_table %>% as.matrix() %>% as.data.frame() %>%
+        unite(Genus_species, c(Genus, Species), sep = "_", remove = FALSE) %>%
+        dplyr::select(-c("Species")) %>%
+        dplyr::rename("Species" = "Genus_species") %>%
+        dplyr::select(-"Species", "Species")
+  
+  # Ensure row names are preserved and match the original tax table
+  rownames(tax_df) <- taxa_names(phylo_obj)
+  # Convert back to matrix
+  new_tax_matrix <- as.matrix(tax_df)
+  # Create a new tax_table object
+  new_tax_table <- tax_table(new_tax_matrix)
+  # Ensure that taxa names are consistent
+  taxa_names(new_tax_table) <- taxa_names(phylo_obj)
+  # Update the phyloseq object with the new tax table
+  phylo_obj@tax_table <- new_tax_table
+  
+  # Assign the object to the global environment to output
+  assign(phyloseq_object_name, phylo_obj, envir = .GlobalEnv)
+}
+```
+
+
+## Filter for unmatched samples
+```{r}
+#This function is used inside the function filter_phyloseq
+filter_unmatched_samples <- function(phyloseq_obj) {
+  # Extract the sample data
+  sample_data_df <- sample_data(phyloseq_obj)
+  sample_data_df <- sample_data_df %>% as.matrix() %>% as.data.frame()
+  
+  # Ensure the necessary columns exist
+  required_columns <- c("Sample", "Type")
+  if (!all(required_columns %in% colnames(sample_data_df))) {
+    stop("The sample data must contain 'Sample' and 'Type' columns.")
+  }
+  
+  # Count the number of unique 'Type' entries for each individual
+  type_counts <- sample_data_df %>%
+    dplyr::select(c("Sample", "Type")) %>%
+    dplyr::group_by(Sample) %>%
+    dplyr::summarize(num_types = n_distinct(Type), .groups = "drop") 
+
+    # Filter for samples with only one type
+  single_type_samples <- type_counts %>%
+    filter(num_types == 1) %>%
+    pull(Sample)
+  
+  print(single_type_samples)
+  
+  filtered_phyloseq_obj <- prune_samples(!(phyloseq_obj@sam_data$Sample) %in% single_type_samples, phyloseq_obj)
+
+  # Return the list of sample IDs
+  return(filtered_phyloseq_obj)
+
+}
+```
+
+
+
+## Filter phyloseq function
+Example:
+
+filter_phyloseq(phy_obj_oscc, "OSCC", Contam_g, Contam_f, Contam_s)
+
+```{r define_filter_phyloseq}
+filter_phyloseq <- function(phylo_obj, study, Contam_g, Contam_f, Contam_s) {
+  # Capture the name of the input variable
+  phylo_name <- deparse(substitute(phylo_obj))
+  
+    # Ensure the 'Study' column exists in the sample data
+  if (!"Study" %in% colnames(sample_data(phylo_obj))) {
+    stop("The 'Study' column is not present in the sample data of the phyloseq object.")
+  }
+  
+  #Filter out samples only in the study - important if you have other studies included in the metadata
+  phylo_obj_f <- switch(study,
+                      "OSCC" = subset_samples(phylo_obj, Study == "OSCC"),
+                      "Pediatric" = subset_samples(phylo_obj, Study == "Pediatric"),
+                      "AdultAbscess" = subset_samples(phylo_obj, Study == "AdultAbscess"))
+    
+
+  #Filter Unassigned
+  phylo_obj_f <- subset_taxa(phylo_obj_f, Phylum != "Unassigned")
+
+  #filter zeros
+  phylo_obj_f <- prune_taxa(taxa_sums(phylo_obj_f) > 0, phylo_obj_f)
+  
+  #Remove values with less than ___ total reads:
+  phylo_obj_f<- prune_samples(sample_sums(phylo_obj_f)>= 1000, phylo_obj_f)
+  
+   #Remove all samples that are not paired (i.e. only have one plaque and one abscess)
+  if (study == "Pediatric") {
+  phylo_obj_f <- filter_unmatched_samples_Pediatric(phylo_obj_f)
+  }else if (study != "Pediatric") {
+  phylo_obj_f <- filter_unmatched_samples(phylo_obj_f)
+  }
+  
+  print(table(phylo_obj_f@sam_data$Sample))
+  
+  #Remove contaminates
+  phylo_obj_f <- subset_taxa(phylo_obj_f, !(Genus %in% Contam_g)) 
+  phylo_obj_f <- subset_taxa(phylo_obj_f, !(Family %in% Contam_f)) 
+  phylo_obj_f <- subset_taxa(phylo_obj_f, !(Species %in% Contam_s))
+    
+  #Output
+  assign(paste0(phylo_name, "_f"), phylo_obj_f, envir = .GlobalEnv)
+}
+
+
+```
+
+
+## Process Phyloseq
+```{r define_process_phyloseq}
+process_phyloseq <- function(phylo_obj_fs) {
+  
+  # Capture the name of the input variable
+  phylo_name <- deparse(substitute(phylo_obj_fs))
+  
+  # Transform to relative abundance with translated pseudo count
+  phylo_obj_fs_t <- transform_sample_counts(phylo_obj_fs, function(x) (x + 0.000001 - min(x)))
+  phylo_obj_fs_t_n <- transform_sample_counts(phylo_obj_fs_t, function(x) (x) / sum(x))
+  
+  # Taxonomic agglomeration at different levels
+  phylo_obj_fs_t_n_pglom <- tax_glom(phylo_obj_fs_t_n, taxrank = "Phylum", NArm = TRUE) 
+  phylo_obj_fs_t_n_gglom <- tax_glom(phylo_obj_fs_t_n, taxrank = "Genus", NArm = TRUE)
+  phylo_obj_fs_t_n_sglom <- tax_glom(phylo_obj_fs_t_n, taxrank = "Species", NArm = TRUE)
+
+  # Convert to data.frame
+  phylo_obj_fs_t_n_pglom_df <- psmelt(phylo_obj_fs_t_n_pglom) 
+  phylo_obj_fs_t_n_gglom_df <- psmelt(phylo_obj_fs_t_n_gglom)
+  phylo_obj_fs_t_n_sglom_df <- psmelt(phylo_obj_fs_t_n_sglom)
+  
+  # Prepare for CSV export
+  species_csv <- phylo_obj_fs_t_n_sglom_df %>%
+    dplyr::select(c("Sample", "Abundance", "Species", "Type")) %>%
+    pivot_wider(names_from = "Species", values_from = "Abundance")
+  
+  genus_csv <- phylo_obj_fs_t_n_gglom_df %>%
+    dplyr::select(c("Sample", "Abundance", "Genus", "Type")) %>%
+    pivot_wider(names_from = "Genus", values_from = "Abundance")
+  
+  # Step 7: Dynamically name and assign outputs
+  assign(paste0(phylo_name, "_t_n"), phylo_obj_fs_t_n, envir = .GlobalEnv)
+  assign(paste0(phylo_name, "_t_n_pglom_df"), phylo_obj_fs_t_n_pglom_df, envir = .GlobalEnv)
+  assign(paste0(phylo_name, "_t_n_gglom_df"), phylo_obj_fs_t_n_gglom_df, envir = .GlobalEnv)
+  assign(paste0(phylo_name, "_t_n_sglom_df"), phylo_obj_fs_t_n_sglom_df, envir = .GlobalEnv)
+  assign(paste0(phylo_name, "_species_csv"), species_csv, envir = .GlobalEnv)
+  assign(paste0(phylo_name, "_genus_csv"), genus_csv, envir = .GlobalEnv)
+}
+```
+
+
+#Save
+```{r}
+save(construct_phyloseq,
+     filter_phyloseq,
+     filter_unmatched_samples,
+     process_phyloseq, 
+     file = "Shiny_Microbiome_Functions.RData")
+```
+

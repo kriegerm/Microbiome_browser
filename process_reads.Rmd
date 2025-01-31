@@ -1,0 +1,137 @@
+---
+title: "00 process reads"
+author: "Madeline Krieger"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    theme: "cosmo"
+    code_folding: "show"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE,
+                      warning = FALSE,
+                      error = FALSE,
+                      fig.path = "./figures/00/",
+                      fig.keep = "all",
+                      dev = c("png"),
+                      cache = FALSE,
+                      # Do not use lazy loading which fails for large objects
+                      cache.lazy = FALSE)
+```
+
+
+# 1.0 Load and Define
+
+## 1.1 Load packages and presets
+### 1.1.1 Outside Packages
+```{r 1.1_load-packages}
+library("pacman")
+pacman::p_load("rmarkdown", "tidyverse", "phyloseq", "knitr","kableExtra", "here", "plyr", "ggpubr", "microViz", "readxl", "microbiome", "pheatmap", "vegan", "DirichletMultinomial", "reshape2", "magrittr", "microshades", "pheatmap","vegan", "data.table", "Polychrome", "fantaxtic","cetcolor", "topicmodels", "ldatuning", "cowplot", "MicrobiomeStat", "randomForest", "caret", "mlbench", "MLmetrics", "mia", "here", "patchwork")
+
+here::i_am("process_reads.Rmd")
+
+``` 
+
+### 1.1.2 My packages
+```{r}
+load("Shiny_Microbiome_Functions.RData")
+```
+
+
+### 1.1.2 Contaminates and presets
+```{r}
+Contam_g <- c("g__Staphylococcus")
+Contam_f <-c("f__Sphingomonadaceae", "f__Comamonadaceae", "f__Moraxellaceae", "f__Pseudomonadaceae", "f__Xanthomonadaceae")
+Contam_s <- c("g__Arthrospira_s__platensis", "g__Anoxybacillus_s__flavithermus", "g__Bacillus_s__anthracis", "g__Bacillus_s__subtilis", "g__Agrobacterium_s__tumefaciens", "g__Mesorhizobium_s__loti",  "g__Burkholderia_s__cepacia", "g__Cupriavidus_s__gilardii", "g__Escherichia_s__coli", "g__Cutibacterium_s__acnes", "g__Corynebacterium_s__diphtheriae", "g__Atopobium_s__parvulum", "g__Actinomyces_s__sp._HMT_180", "g__Enterobacter_s__hormaechei", "g__Caulobacter_s__sp._HMT_002", "g__Micrococcus_s__luteus")
+
+colors_all= c("Abscess" = "#FF495C", "Tumor"="#F0C808","Plaque"="#083D77", "AN"="#43AA8B" )
+colors_study= c("AdultAbscess" = "#FF495C", "Pediatric"="#3399FF","OSCC"="#03CEA4" )
+
+
+core_colors = c("#F76F8E","#083D77","#B8D4E3", "#FAAA00", "#3399FF","#FF495C","#477071", '#03CEA4',  "#5F00BA", "#BDAC9E", "white", "#FFD900")
+
+
+set.seed(1234)
+date = Sys.Date()
+```
+
+
+
+# 2.0 Process data
+## 2.1 OSCC
+```{r process_OSCC}
+#Define variables and file locations
+biom_location <- "../oral_microbiome_exploratory/PRJNA822685_OSCC/Qiime2/blast/Files_For_Phyloseq/feature_table_w_taxonomy.biom"
+tree_location <- "../oral_microbiome_exploratory/PRJNA822685_OSCC/Qiime2/Tree/Unfiltered_Rooted_tree_for_phyloseq/tree.nwk"
+sampledata_location <- "../oral_microbiome_exploratory/PRJNA822685_OSCC/Qiime2/Files_For_Phyloseq/metadata_phyloseq.tsv"
+
+#Run pre-processing functions
+phy_obj_oscc <- construct_phyloseq("phy_obj_oscc", biom_location, tree_location, sampledata_location)
+filter_phyloseq(phy_obj_oscc, "OSCC", Contam_g, Contam_f, Contam_s)
+
+# Update the metadata with a column called "condition", which is either "control" or "abnormal" 
+sample_metadata <- sample_data(phy_obj_oscc)
+
+sample_metadata$condition <- ifelse(
+  sample_metadata$Type %in% c("Abscess", "Tumor"), 
+  "abnormal", 
+  ifelse(sample_metadata$Type %in% c("Plaque", "AN"), 
+         "control", 
+         NA) # Optional: Assign NA for unhandled cases
+)
+
+# Update the sample_data in the phyloseq object
+sample_data(phy_obj_oscc) <- sample_metadata
+```
+
+
+### 2.4.1 Re-label Merged ASVs
+```{r}
+#Make sure these two numbers are the same
+length(unique(taxa_names(phy_obj_oscc)))
+new_otu_names <- sprintf("ASV%04d", seq_along(taxa_names(phy_obj_oscc)))
+length(unique(new_otu_names)) 
+
+# Assign the new names to the phyloseq object
+taxa_names(phy_obj_oscc) <- new_otu_names
+
+# Verify the change
+head(taxa_names(phy_obj_oscc))
+```
+
+### 2.4.2 Clean up tax table 
+```{r}
+phy_obj_oscc <- tax_fix(phy_obj_oscc)
+
+tax_table_edit <- phy_obj_oscc@tax_table %>% as.data.frame()
+df_unique <- tax_table_edit %>% distinct(., Species, .keep_all=TRUE)
+```
+
+### 2.4.3 Filter singletons
+```{r}
+# Filter singletons
+phy_obj_oscc_fs <- prune_taxa(taxa_sums(phy_obj_oscc) > 1, phy_obj_oscc)
+length(unique(taxa_names(phy_obj_oscc_fs)))
+```
+
+### 2.4.4 Histogram of counts
+```{r}
+otu_table <- otu_table(phy_obj_oscc_fs)
+counts <- as.vector(otu_table)
+
+# Create the histogram
+plot <- hist(counts, main="Histogram of Counts", xlab="Counts", ylab="Frequency", col="skyblue", border="black", breaks=1000, xlim = range(0, 8000), ylim=range(0, 1000)) 
+```
+
+
+# 3.0 Save
+```{r}
+saveRDS(list(phy_obj_oscc_fs=phy_obj_oscc_fs, 
+             phy_obj_oscc= phy_obj_oscc), 
+             file = paste0("00data.rds"))
+```
