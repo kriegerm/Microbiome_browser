@@ -154,6 +154,9 @@ filter_phyloseq <- function(phylo_obj, study, Contam_g, Contam_f, Contam_s) {
 
   #Filter Unassigned
   phylo_obj_f <- subset_taxa(phylo_obj_f, Phylum != "Unassigned")
+  
+  #Microviz Taxfix
+  phylo_obj_f <- microViz::tax_fix(phylo_obj_f)
 
   #filter zeros
   phylo_obj_f <- prune_taxa(taxa_sums(phylo_obj_f) > 0, phylo_obj_f)
@@ -162,11 +165,8 @@ filter_phyloseq <- function(phylo_obj, study, Contam_g, Contam_f, Contam_s) {
   phylo_obj_f<- prune_samples(sample_sums(phylo_obj_f)>= 1000, phylo_obj_f)
   
    #Remove all samples that are not paired (i.e. only have one plaque and one abscess)
-  if (study == "Pediatric") {
-  phylo_obj_f <- filter_unmatched_samples_Pediatric(phylo_obj_f)
-  }else if (study != "Pediatric") {
+
   phylo_obj_f <- filter_unmatched_samples(phylo_obj_f)
-  }
   
   print(table(phylo_obj_f@sam_data$Sample))
   
@@ -180,47 +180,6 @@ filter_phyloseq <- function(phylo_obj, study, Contam_g, Contam_f, Contam_s) {
 }
 
 
-```
-
-
-## Process Phyloseq
-```{r define_process_phyloseq}
-process_phyloseq <- function(phylo_obj_fs) {
-  
-  # Capture the name of the input variable
-  phylo_name <- deparse(substitute(phylo_obj_fs))
-  
-  # Transform to relative abundance with translated pseudo count
-  phylo_obj_fs_t <- transform_sample_counts(phylo_obj_fs, function(x) (x + 0.000001 - min(x)))
-  phylo_obj_fs_t_n <- transform_sample_counts(phylo_obj_fs_t, function(x) (x) / sum(x))
-  
-  # Taxonomic agglomeration at different levels
-  phylo_obj_fs_t_n_pglom <- tax_glom(phylo_obj_fs_t_n, taxrank = "Phylum", NArm = TRUE) 
-  phylo_obj_fs_t_n_gglom <- tax_glom(phylo_obj_fs_t_n, taxrank = "Genus", NArm = TRUE)
-  phylo_obj_fs_t_n_sglom <- tax_glom(phylo_obj_fs_t_n, taxrank = "Species", NArm = TRUE)
-
-  # Convert to data.frame
-  phylo_obj_fs_t_n_pglom_df <- psmelt(phylo_obj_fs_t_n_pglom) 
-  phylo_obj_fs_t_n_gglom_df <- psmelt(phylo_obj_fs_t_n_gglom)
-  phylo_obj_fs_t_n_sglom_df <- psmelt(phylo_obj_fs_t_n_sglom)
-  
-  # Prepare for CSV export
-  species_csv <- phylo_obj_fs_t_n_sglom_df %>%
-    dplyr::select(c("Sample", "Abundance", "Species", "Type")) %>%
-    pivot_wider(names_from = "Species", values_from = "Abundance")
-  
-  genus_csv <- phylo_obj_fs_t_n_gglom_df %>%
-    dplyr::select(c("Sample", "Abundance", "Genus", "Type")) %>%
-    pivot_wider(names_from = "Genus", values_from = "Abundance")
-  
-  # Step 7: Dynamically name and assign outputs
-  assign(paste0(phylo_name, "_t_n"), phylo_obj_fs_t_n, envir = .GlobalEnv)
-  assign(paste0(phylo_name, "_t_n_pglom_df"), phylo_obj_fs_t_n_pglom_df, envir = .GlobalEnv)
-  assign(paste0(phylo_name, "_t_n_gglom_df"), phylo_obj_fs_t_n_gglom_df, envir = .GlobalEnv)
-  assign(paste0(phylo_name, "_t_n_sglom_df"), phylo_obj_fs_t_n_sglom_df, envir = .GlobalEnv)
-  assign(paste0(phylo_name, "_species_csv"), species_csv, envir = .GlobalEnv)
-  assign(paste0(phylo_name, "_genus_csv"), genus_csv, envir = .GlobalEnv)
-}
 ```
 
 
